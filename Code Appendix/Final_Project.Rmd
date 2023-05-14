@@ -1,0 +1,587 @@
+---
+title:  |
+  | Deep Learning-Based Survival Analysis 
+  | for Patients with Assay of Serum Free Light Chain
+author: Jialin Liu, Yanru Liao
+date: May 13, 2023
+output:
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+    toc: true
+    number_sections: true
+bibliography: references.bib
+---
+
+```{r setup, message=FALSE, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(survivalmodels)
+library(tensorflow)
+library(survival)
+library(knitr)
+library(timereg)
+library(KMsurv)
+library(dplyr)
+library(MASS)
+library(maxstat)
+library(survminer)
+library(kableExtra)
+library(gridExtra)
+library(mlr3pipelines)
+library(mlr3benchmark)
+library(mlr3extralearners)
+library(mlr3viz)
+library(mlr3tuning)
+library(mlr3proba)
+library(ggpubr)
+knitr::opts_chunk$set(fig.height = 5)
+knitr::opts_chunk$set(fig.width = 8)
+knitr::opts_chunk$set(fig.align="center")
+```
+
+```{r, eval=FALSE}
+# options(repos=c(
+#   mlrorg = 'https://mlr-org.r-universe.dev',
+#   raphaels1 = 'https://raphaels1.r-universe.dev',
+#   CRAN = 'https://cloud.r-project.org'
+# ))
+# install.packages("remotes")
+# install.packages(c("ggplot2", "mlr3benchmark", "mlr3pipelines",  "mlr3tuning"))
+# remotes::install_github('mlr-org/mlr3proba')
+# remotes::install_github("mlr-org/mlr3viz")
+# # install.packages("mlr3proba", repos = "https://mlr-org.r-universe.dev")
+# remotes::install_github("mlr-org/mlr3benchmark")
+# install.packages("PMCMRplus") # required for Friedman test
+# remotes::install_github('mlr-org/mlr3extralearners#147')
+```
+
+```{r, eval=FALSE}
+# remotes::install_github('RaphaelS1/survivalmodels')
+# #library(survivalmodels)
+# install_pycox(pip = TRUE, install_torch = TRUE, lib = "Users/jialinliu/Desktop/PHP 2650s")
+# # install_keras(pip = TRUE, install_tensorflow = TRUE,lib = "Users/jialinliu/Desktop/PHP 2650")
+```
+
+# Introduction
+
+In many clinical studies, the primary problem frequently concerned by applied statisticians is the analysis of **"time-to-event"** outcomes. This outcome mainly describes the time that an event takes to occur after a term called exposure, examples of such exposure might be diagnosis of Hepatitis or hospital admissions of patients with heart failure, and event of interests could be death, cirrhosis of the liver that is a common outcome after the one has been diagnosed with Hepatitis, hospital readmissions of patients with heart failure for any reason after a year. Exposure is where a clock starts to assess the time-to-event and the event which progresses into research interests would be where the clock stops, the time between those two points which is called survival time that is of particular interest. Although a typical example of time-to-event analysis is looking at diagnoses of particular forms of cancer as exposure and assessing how long it take patients to die from the starting diagnosed time or saying how long time they survive after diagnoses, survival analysis can also be use in diverse fields such as health insurance or engineering, for example, companies can make early incentives to retain customers by estimating when a customer is likely to stop subscribing, or estimating the remaining useful life of a machine[@noauthor_deep_nodate].
+
+The survival analysis is complicated by issues of **censoring** that occurs when we don't know the exact time-to-event for an included observation. There are various types of censoring, such as left censoring, interval censoring, and right censoring. Let $X$ be a positive random variable describes time points to some event and C be a random variable referred to as the censoring time, left censoring is when observed time $Y = max(X,C)$ and $\Delta = I(X \geq C)$, for example, if you are asked how old were you when you got your first job, and you only recall it before your turned 21. Here, $C=21$ and $\Delta=0$. Interval censoring occurs when patient's event time is only known to fall within a particular time interval $[L_i,R_i]$ ($L$ for left endpoint and $R$ for right endpoint) but we don't know the exact time they took. The most common form of censoring is right censoring where time-to-event is greater than some fixed values. Again, we assume a exact event time $X$ and a fixed censoring time $C$ for a specific individual under study. The exact lifetime $X$ will be known if and only if $X$ is less than or equal to $C$. If $X$ is greater than $C$, the individual is a survivor which is saying this individual event time is censored at $C$[@klein_survival_2003]. In the remainder of our discussion, formally, we denote observed survival time $Y=min(t,c)$ that consists with the time to event $t >0$ and the censoring time $c >0$ as follows. Then event indicator $\Delta = I(t \leq c)$ is introduced to indicate the failure time $x$ if $\Delta = 1$ and $\Delta = 0$ when it is censored.
+
+```{=tex}
+\begin{equation}
+Y = min(t,c) = 
+   \begin{cases}
+        t , & \text{if } \Delta = 1\\
+        c , & \text{if } \Delta = 0
+    \end{cases}
+\end{equation}
+```
+Not only survivor after the fixed censoring time $c$ is the only censoring case, but participants who drop out of the study or are lost to follow-up are considered as some other reasons for censoring.
+
+```{r echo=FALSE, fig.align = "center"}
+knitr::include_graphics("calendartime.svg")
+```
+
+The graph above considers a hypothetical clinical trial that followed 5 participants over a year (in months) and shows a timeline for each of them with heart failure from they have been enrolled in hospitals until when they have died (event), along with an indication of whether or not they died or were censored. To assess survival analysis for each of them with different starting times, we indeed reset survival times so that they start at the same point by shifting them backwards and replacing the x-axis by time since enrollment in months. Thus, the right graph above shows the "calendar time" on the X axis and the amount of time that has elapsed to an event since the exposure of the clinical trial or censoring can be read directly. Patient B and D were followed for four months and a half, and two months, respectively, and then died. In contrast, patient E was followed for the entire period of study but did not experience the event of interest as a survivor. Patient A was lost to follow-up after three months, and patient C chose to leave this study after four months without observed time to event. For those censored patients, it is unknown whether they experienced the event of interest or not and how long time they survive outside the range of monitoring of this trial.
+
+# Basic Quantities and Models
+
+## The Survival Function
+
+Let $T$ be a positive random variable, usually the time to some specified event. One basic quantity that characterizes the distribution of $T$ is the survival function, which is the probability of an individual surviving beyond time $t$ and defined as $S(t) = P(T > t)$[@klein_survival_2003]. If $T$ is a continuous random variable, then, $S(t)$ is a continuous and monotone non-increasing function with $S(0) = 1$ and $S(\infty) = 0$. The cumulative distribution function is defined as $F(t) = P(T \leq t) = 1-S(t)$. Intuitively, the survival function can be also calculated by taking the integral with respect to the probability density function $f(t) = P(T=t)$: $S(t) = \int_t^\infty f(x) dx$ when $T$ is continuous.
+
+## The Hazard Function
+
+The hazard function, sometimes called risk function, is defined as
+
+```{=tex}
+\begin{equation}
+h(t) = \lim_{\Delta t\to 0} \frac{P[t \leq T \leq t+\Delta t | T \geq t]}{\Delta t} \\
+\end{equation}
+```
+Intuitively, $h(t)$ is the instantaneous "rate" of failure (or risk of event occurring) at time $t$ given an individual is alive at time $t$, in other words, the chance for an individual who will experience the event in the next instant time $t$[@klein_survival_2003]. If $T$ is continuous, we have $h(t) = -\frac{d}{dt}\ln(S(t)) =\frac{f(t)}{S(t)}$. Estimating $h(t)$ is usually challenging, so a more common related quantity to estimate is the cumulative hazard function:
+
+```{=tex}
+\begin{equation}
+H(t) = \int_0^t h(u) du = -\ln(S(t)). \\
+\end{equation}
+```
+The importance of cumulative hazard function may not be apparent right now, but it is particularly useful to derive all of the other functions (survival function, cumulative density function, or hazard function) since these functions are related to each other in a mathematical sense.
+
+There are many general shapes of hazard functions, so the graph below shows some of the main kinds of hazard functions including increasing, constant, decreasing and bathtub-shaped hazards, except for hump-shaped hazards.
+
+```{r echo=FALSE, out.width="80%", out.height="80%", fig.align = "center"}
+knitr::include_graphics("hazardshapes.png")
+```
+
+The bathtub curve could describe the probability of customers unsubscribing from a health insurance over time. Within the early stage of period, the probability of unsubscribing (failure) is starting with a high point since customers were skeptical at first due to a high annual cost on insurance. But the risk of unsubscribing would go down and stagnate at a lower level since customers sometimes got benefits from the insurance, while the risk may be increasing again because customers probably found a fairly inexpensive plan or budget cuts on insurance[@noauthor_deep_nodate]. Hence the graph of failure distribution describe the way how the likelihood of event changes over time.
+
+# Survival Dataset
+
+The primary aim of survival analysis is to model the survival pattern of subjects and derives estimates and explanations of survival and hazard functions using survival data. To start off, we are using the real-world, publicly available dataset of 7874 subjects sampled from Olmsted County residents with 50 years or more, which is found in the `survival` R package[@noauthor_flchain_nodate]. This is a public dataset introduced by Dispenzieri [@dispenzieri2012use]. The original dataset contains 15759 subjects to study the relationship between serum free light chain (FLC) and mortality. The subject identifiers and dates have been removed and subsampling was done to further protect patient information[@noauthor_flchain_nodate]. This data frame contains 7874 observations and the following 11 columns[@dispenzieri2012use]:
+
+> In 1995 Dr. Robert Kyle embarked on a study to determine the prevalence of monoclonal gammopathy of undetermined significance (MGUS) in Olmsted County, Minnesota, a condition which is normally only found by chance from a test (serum electrophoresis) which is ordered for other causes. Later work suggested that one component of immunoglobulin production, the serum free light chain, might be a possible marker for immune disregulation. In 2010 Dr. Angela Dispenzieri and colleagues assayed FLC levels on those samples from the original study for which they had patient permission and from which sufficient material remained for further testing. They found that elevated FLC levels were indeed associated with higher death rates.
+>
+> Patients were recruited when they came to the clinic for other appointments, with a final random sample of those who had not yet had a visit since the study began. An interesting side question is whether there are differences between early, mid, and late recruits.
+
+```{r}
+var.desc <- data.frame(Variable = c("age", "sex", "sample.yr", "kappa", "lambda", "flc.grp", "creatinine", "mgus", "futime", "death", "chapter"),
+                       Description = linebreak(c("age in years", "F=female, M=male",
+            "the calendar year in which a blood sample was obtained",
+            "serum free light chain, kappa portion",
+            "serum free light chain, lambda portion",
+            "the FLC group for the subject, as used in the original analysis", "serum creatinine", "1 if the subject had been diagnosed with monoclonal gammapothy (MGUS)", "days from enrollment until death. Note that there are 3 subjects whose sample was obtained on their death date.", "0=alive at last contact date, 1=dead", "for those who died, a grouping of their primary cause of death by chapter headings of the International Code of Diseases ICD-9")))
+
+var.desc %>%
+  mutate_all(linebreak)%>%
+  kable(escape = FALSE) %>%
+  column_spec(2, width="30em")%>%
+  kable_styling(full_width = FALSE, latex_options = c("striped",'hold_position'))
+
+```
+
+It includes covariates such as age, gender, serum creatinine, an indicator of diagnosis of MGUS, and primary causes of death. The `chapter` column has been removed because, throughout our discussion, we are not taking into account competing risk outcomes, where a substantial proportion of subjects may die from causes other than event of interest. Then individuals with missing covariates are eliminated, then, we analyze based on the remaining subset with 6524 subjects. Since `sample.year` obtains nine unique values, and driven by the side question, we separate it into three recruits: early, middle and late by grouping every three years and storing in `recruits` variable. We add two more variables that describe FLC levels and FLC ratio, respectively. The FLC levels are calculated by adding up the `kappa` and `lambda` segments. Moreover, according to the Mayo Clinic, it identifies the detection of monoclonal light chains relies on the free kappa and lambda (K/L) light chain ratio ($\frac{kappa}{lambda}$)[flchain EDA](https://github.com/mwmachado/FlchainExploration/blob/master/Flchain_Exploration.md).
+
+```{r}
+# Preprocessing data
+data(flchain, package="survival")
+# Change bad names
+names(flchain)[names(flchain) == "sample.yr"] <- 'sample.year'
+names(flchain)[names(flchain) == "flc.grp"] <- 'flc.group'
+# Convert to Factor
+flchain$flc.group <- as.factor(flchain$flc.group)
+flchain$mgus <- as.factor(flchain$mgus)
+flchain$mgus <- factor(flchain$mgus,
+                    labels = c('non-mgus', 'mgus'))
+# flchain$death <- factor(flchain$death,
+#                      labels = c('alive', 'dead'))
+flchain$sex <- as.factor(flchain$sex)
+
+# levels(flchain$chapter)
+chapter <- c('Circulatory', 'Neoplasms', 'Respiratory', 'Mental', 'Nervous')
+levels(flchain$chapter)[!levels(flchain$chapter) %in% chapter] <- 'Others'
+# sort(table(flchain$chapter))
+
+flchain$age <- as.integer(flchain$age)
+flchain$sample.year <- as.integer(flchain$sample.year)
+flchain$futime <- as.integer(flchain$futime)
+
+flchain <- flchain[,-11] # remove chapter column
+flchain <- na.omit(flchain)
+
+# Cut variables
+# table(flchain$sample.year)
+flchain$recruits <- cut(flchain$sample.year,
+                     breaks = c(1994, 1997, 2000, 2003),
+                     labels = c('early', 'middle', 'late'))
+
+# Create useful variables
+flchain <- transform(flchain,
+                  flc       = kappa + lambda,
+                  flc.ratio = kappa / lambda)
+```
+
+Out of this subset 80% of the participants (in the left graph below) were recruited at the early stage (within the first three years) while less than 5% of subjects were recruited in the last three years which are considered as 'minority' in our study. The distribution of the event of interest (in the right graph below) shows that 70% of subjects are labelled as "censored" and 30% of samples died from many different causes.
+
+```{r, warning=FALSE, message=FALSE}
+recruits <- ggplot(flchain, aes(recruits, (..count.. / sum(..count..)))) +
+  geom_bar(fill="lightblue2") +
+  scale_y_continuous(breaks = seq(0, 1, .1))+
+theme_light()+
+ theme(legend.position="bottom",
+        axis.line = element_line(colour = "black",size=0.8),
+        text = element_text(size=10),
+        axis.text = element_text(colour = "black",size = 8,face="bold"),
+        axis.title = element_text(size = 10,face="bold"),
+        axis.ticks.length=unit(.25, "cm"),
+        axis.ticks = element_line(colour = "black", size = 1))+
+ labs(title="Recruits Distribution",x="recruits", y = "Density")
+
+censorprop <- ggplot(flchain)+
+  geom_bar(aes(factor(death), (..count.. / sum(..count..))), fill="lightblue2")+
+  scale_y_continuous(breaks = seq(0, 1, .1))+
+theme_light()+
+ theme(legend.position="bottom",
+        axis.line = element_line(colour = "black",size=0.8),
+        text = element_text(size=10),
+        axis.text = element_text(colour = "black",size = 8,face="bold"),
+        axis.title = element_text(size = 10,face="bold"),
+        axis.ticks.length=unit(.25, "cm"),
+        axis.ticks = element_line(colour = "black", size = 1))+
+ labs(title="Event Distribution",x="Death (Event of Interest)", y = "Density")
+
+grid.arrange(recruits, censorprop, ncol =2)
+```
+
+Survival analysis requires the following variables:
+
+-   Column `death` is the event indicator such that if $death = 1$, the event happens and $death =0$ in case of censoring.
+
+-   Column `futime` measures total time length of follow-up or time of death.
+
+-   All the other columns excluding time and boolean indicator of death form a p-dimensional feature vector.
+
+# Standard Methods in Survival Analysis
+
+In this section we shall examine techniques for estimation of survival function $S(t)$ and/or (cumulative) hazard function ($h(t),H(t)$) based on a right-censored survival data in section 3. The standard estimation of basic quantities for right-censored data can be mainly classified into three groups: **nonparametric**, **semi-parametric**, and parametric approaches. Although nonparametric or semi-parametric models will be used frequently and extensively, the parametric approach is popular among researchers because it requires the pre-assumption about distribution of survival times[@noauthor_deep_nodate], such as exponential, Weibull and gamma distributions, and also give insight into the nature of survival functions[@klein_survival_2003].
+
+In the non-parametric methods there are no assumptions about underlying distributions of survival times[@noauthor_deep_nodate]. The non-parametric approach used to describe survival probabilities as function of time does not rely on any parameters instead is calculated directly from particular datasets, whereas the semi-parametric approach corresponds to both parametric and non-parametric components in section 4.2.
+
+## Non-parametric Kaplan-Meier Estimator
+
+The basic and commonly used non-parametric estimator of survival, **Kaplan-Meier estimator**, is essentially the bedrock of survival analysis. $\hat{S_{KM}}(t)$ is a nearly unbiased estimator for $S(t)$, which means its expected value of estimator is the truth survival probability. This estimator is defined as follows in the range of times $t$ from data:
+
+```{=tex}
+\begin{equation}
+\hat{S_{KM}}(t)=
+   \begin{cases}
+        \prod_{t_i \leq t} (\frac{n_i-d_i}{n_i}), & \text{if } t > t_i\\
+        1 , & \text{if } t \leq t_i
+    \end{cases}
+\end{equation}
+```
+where $n_i$ is the number of people at risk for each of the time intervals and is calculated by the number of people at risk from the previous time interval minus the number of observations experience event of interest $d_i$ and the number of censored subjects during the previous time interval.
+
+Typically the estimated $S(t)$ using Kaplan-Meier function is a step function, but it does resemble a curve for a large number of overall population of individuals with pretty more small steps (in the left graph below). The Kaplan-Merier plot of a subset (100) of the `flchain` dataset where x-axis is time variable and y-axis is survival function, $S(T)$, defined by $1-F(T)$ where F is the cumulative distribution function. Red crosses indicate points where censoring takes place. It is clear that the probability of subjects who survive at 1000 days (around 3 years) since enrollment is about 93% and the probability of surviving at 3000 days decreases to 78%.
+
+The main disadvantage of the non-parametric approach is loss of considerations of multivariate features from datasets which only offer an average view of survival probability for overall population. This issue is effectively addressed by the semi-parametric models, which will be presented in the subsequent section.
+
+```{r echo=FALSE, fig.align = "center"}
+knitr::include_graphics("KM_Curve.png")
+```
+
+## Semi-parametric Cox Proportional Hazards Model
+
+To explain the relationship between the time to event and a set of explanatory variables the widely used multiplicative hazards models is often called the Cox (1972) model or the proportional hazards model (CoxPH). This model relates the hazard rate to a set of covariates $x$ where $x_i \in\mathbb{R^p}$ through the relationship
+
+```{=tex}
+\begin{equation}
+h(t | x_{i1},...,x_{ip}) = h_0(t)exp(\sum_{k=1}^{p} \beta_{k}x_{ik}) = h_0(t)e^{\beta^{T}x_i}. \\
+\end{equation}
+```
+to describe the hazard rate at time $t$ for an individual $i$ with a **parametric vector** of covariate $x_i$. Here, $\beta$ is a p-dimensional vector of estimated coefficients obtained from the Cox PH model and $h_0(t)$ is an unspecific function referred to as **non-parametric component** which is called the **baseline hazard**. The key of the Cox model is to split the hazard function into two parts: (1) the baseline hazard in terms of time $t$ only and (2) a parametric component is assumed only for the covariate effect. For inferential and interpretable purposes we are usually interested in explaining the hazard ratio $\frac{h(t|X_1)}{h(t|X_2)} = \frac{h_0(t)\exp{\beta^{T}x_1}}{h_0(t)\exp{\beta^{T}x_2}} = e^{\beta^T(x_1-x_2)}$ and predicting $S(t|x)$ when both $\hat{\beta}$ and $h_0(t)$ are given.
+
+## Testing Proportional Hazards Assumption
+
+Importantly, the Cox PH model makes the proportional hazard assumption, which states the hazard functions between two subgroups of subjects keep proportional over time and hazard ratio is constant over time as well[@noauthor_deep_nodate]. To check the adequacy of proportional hazards assumption statistical tests and graphical diagnostics based on the scaled Schoenfeld residuals are used[@noauthor_cox_nodate].
+
+```{r, eval=FALSE, message = FALSE, warning=FALSE, fig.height=4}
+mod.res <- resid(flc.cox.fit)
+age <- data.frame(y=mod.res, x=flchain$age)
+sample.year <- data.frame(y=mod.res, x=flchain$sample.year)
+flc <- data.frame(y=mod.res, x=flchain$flc)
+kappa <- data.frame(y=mod.res, x=flchain$kappa)
+lambda <- data.frame(y=mod.res, x=flchain$lambda)
+creatinine <- data.frame(y=mod.res, x=flchain$creatinine)
+
+m1 <-ggplot(age,aes(x=x,y=y))+geom_point()+labs(x="Age in years",y="Matingale residual")+stat_smooth(method = loess)
+
+m2<-ggplot(sample.year,aes(x=x,y=y))+geom_point()+labs(x="Calendar year",y="Matingale residual")+stat_smooth(method = loess)
+
+m3<-ggplot(flc,aes(x=x,y=y))+geom_point()+labs(x="FLC",y="Matingale residual")+stat_smooth(method = loess)
+
+
+m4<-ggplot(kappa,aes(x=x,y=y))+geom_point()+labs(x="kappa",y="Matingale residual")+stat_smooth(method = loess)
+
+m5<-ggplot(lambda,aes(x=x,y=y))+geom_point()+labs(x="lambda",y="Matingale residual")+stat_smooth(method = loess)
+
+m6<-ggplot(creatinine,aes(x=x,y=y))+geom_point()+labs(x="creatinine",y="Matingale residual")+stat_smooth(method = loess)
+
+grid.arrange(m1,m2,m3,m4,m5,m6, ncol=3)
+```
+
+```{r, eval=FALSE}
+ggcoxfunctional(Surv(futime, death) ~ flc + log(flc) + sqrt(flc), data = flchain)
+```
+
+### Graphical Checks for categorical variables
+
+If the predictor satisfy the proportional hazard assumption then the graph of the survival function estimated by Kaplan-Meier curves versus the survival time should results in a graph with parallel curves[@noauthor_testing_nodate], similarly the graph of log cumulative hazard function $\ln(\hat{H(t)})$ versus time $t$ should be approximately parallel and constant vertical separation between two groups of log of cumulative hazard rates if the predictor is proportional[@klein_survival_2003]. Both of these techniques do not perform effectively when applied to either a continuous predictor or categorical predictors with many levels since the resulting graph tends to become overly congested[@noauthor_testing_nodate]. Furthermore, the curves are clustered together due to a large number of time points and observed participants so that it may be difficult to evaluate how close to parallel is close enough, thus we apply the same resampling technique utilized in the previous section to assess proportional hazards assumption for `sex` group among 100 subjects. The below graph uses Kaplan-Meier curves between two gender groups to assess proportional hazards and, in fact, their survival curves cross suggesting that this predictor does not satisfy the proportional hazard assumption.
+
+```{r, out.height="70%", out.width="70%"}
+set.seed(5)
+# concordance(best.cox.fit)
+# concordance(flc.cox.fit)
+sfit = survfit(Surv(futime, death)~sex, data=flchain[sample(nrow(flchain), 100), ])
+ggsurvplot(sfit,
+           conf.int=TRUE, # add confidence intervals
+           pval=TRUE, # show the p-value for the log-rank test
+           risk.table=FALSE, # show a risk table below the plot
+           # legend.labs=c("Urban", "Not urban"), # change group labels
+           # legend.title="Urban environment",  # add legend title
+           # palette=c("dodgerblue4", "orchid2"), # change colors of the groups
+           title="Kaplan-Meier Curves for Sex Group of 100 Samples")
+```
+
+The another approach to check the proportionality assumption is to plot log cumulative baseline hazard rates for two results of diagnoses with MGUS versus time. The graph below for assessing proportionality of `mgus` predictor shows unparalleled and inconsistent shaped step curves suggesting nonproportional hazards, which is primarily caused by the unbalanced distribution of groups of `mgus` with 6428 non-MGUS patients but only 96 subjects who had been diagnosed with MGUS. We should be aware of significance of covariate and consider if it is necessary to be included in the Cox model.
+
+```{r, out.height="70%", out.width="70%"}
+coxph.fit2.non.mgus <- coxph(Surv(futime, death) ~ mgus, data=flchain[flchain$mgus=="non-mgus", ], ties = "breslow")
+coxph.fit2.mgus <- coxph(Surv(futime, death) ~ mgus, data=flchain[flchain$mgus=="mgus",], ties = "breslow")
+b.h.1 <- basehaz(coxph.fit2.non.mgus)
+b.h.1$log.hazard <- log(b.h.1$hazar)
+b.h.1$type <- c("non-mgus")
+b.h.2 <- basehaz(coxph.fit2.mgus)
+b.h.2$log.hazard <- log(b.h.2$hazar)
+b.h.2$type <- c("mgus")
+
+b.h.combine <- rbind(b.h.1, b.h.2)
+ggplot(data = b.h.combine)+
+  theme_classic()+
+  geom_step(aes(x= time, y = log.hazard, col = as.factor(type)))+
+  labs(colour="Type", title="Log cumulative hazards functions for MGUS Group")
+```
+
+```{r, eval=FALSE}
+coxph.fit3.male <- coxph(Surv(futime, death) ~ sex, data=flchain[flchain$sex=="M",], ties = "breslow")
+coxph.fit3.female <- coxph(Surv(futime, death) ~ sex, data=flchain[flchain$sex=="F",], ties = "breslow")
+b.h.male <- basehaz(coxph.fit3.male)
+b.h.male$log.hazard <- log(b.h.male$hazar)
+b.h.male$type <- c("male")
+b.h.female <- basehaz(coxph.fit3.female)
+b.h.female$log.hazard <- log(b.h.female$hazar)
+b.h.female$type <- c("female")
+
+b.h.sex <- rbind(b.h.male, b.h.female)
+ggplot(data = b.h.sex)+
+  geom_step(aes(x= time, y = log.hazard, col = as.factor(type)))+
+  labs(colour="Type")
+```
+
+### Scaled Schoenfeld Residuals for Continuous Variables
+
+In the `survival` package, the function `cox.zph()` provides a simple and global test for performing a comprehensive assessment of the proportional hazards assumption for each covariate contained in a Cox regression model fitting. Specifically, this function correlates the corresponding scaled Schoenfeld residuals for each covariate over time[@noauthor_cox_nodate], to test the independence between Schoenfeld residuals and time if the assumption is valid.
+
+In order to determine the best variables we start with a full model that contains all predictors mentioned above, then the `step()` function will be utilized to help us complete necessary model selection procedures through backward elimination process based on information criteria AIC. To answer our primary interest of the relationship between serum free light chain (FLC) and mortality, we should keep `flc` all the time during the model selection steps even though it may not show significance to predict survival rates for patients.
+
+```{r, fig.height = 6, message = FALSE, warning=FALSE, echo=TRUE}
+flc.cox.fit <- coxph(Surv(futime, death) ~ age + sex + sample.year + 
+                       creatinine + mgus + flc + flc.ratio, data = flchain)
+```
+
+```{r, eval=FALSE, echo=TRUE}
+step(flc.cox.fit, direction = "backward")
+```
+
+Here's the final Cox PH model with the best variables by model selection procedure and, sequentially, we will be using this model to assess proportionality property for continuous covariates.
+
+```{r,eval=FALSE, echo=TRUE}
+best.cox.fit <- coxph(Surv(futime, death) ~ age + sex + sample.year + flc, 
+                      data = flchain)
+```
+
+The first plot below shows a non-random pattern against time which gives an evidence of a violation of assumption for `age` predictor. Then, the remaining four graphs show a validation of the proportional hazard assumption by non-significant p-values (all above 0.05).
+
+```{r, fig.width=12}
+cox.fit <- coxph(Surv(futime, death) ~ age + sex + sample.year + flc, data = flchain)
+cox.ph <-  cox.zph(cox.fit)
+ggcoxzph(cox.ph)
+```
+
+However, the output for our dataset does not does not prove the proportionality due to a violation of some covariates. Some additional methods can overcome this violation. There exist extended approaches that can overcome this violation issue: random survival forests as an extension of bagging random forests technique and deep learning technologies to analyze time to event with right-censored survival data, which one widely used is often called **DeepSurv**.
+
+### Testing Influential Observations with Neural Networks
+
+Deviance residuals are best used for finding outliers or influential obserations. A residual of high absolute value is indicative of an outlier or influential observations, here we set $\pm2$ as a criteria for checking influential points. A positively valued deviance residual is indicative of an observation whereby the event occurred sooner than predicted; the converse is true for negatively valued residual[@noauthor_cox_nodate]. The below figure of deviance residual depicts many potential outliers or influential observations which could potentially influence performance of model fitting. In particular, there exist some censored cases below the criteria line ($residuals=-2$) and are outliers occurring the event later than predicted.
+
+```{r, message=FALSE, warning=FALSE}
+ggcoxdiagnostics(cox.fit, type = c("deviance"), 
+                 hline.yintercept = c(-2,2),
+                 linear.predictions = FALSE, ggtheme = theme_bw())
+```
+
+# Deep Learning for Survival Analysis (DeepSurv)
+
+## Non-linear Survival Analysis with Neural Networks
+
+The Cox regression (proportional hazards) model is fitted and estimate $\beta$ by maximizing the `partial likelihood`, which is based on the probability for the $i$-th individual who experience the event of interest at time $t_i$ given that there is exactly one event occurs at time $t_i$ and knowing the values of $x$ (vector of covariates) for all individuals at risk at $t_i$. It is defined as $L_{i}(\beta)$ to describe the conditional probability as follows:
+
+```{=tex}
+\begin{equation}
+  \begin{aligned}
+L_{i}(\beta) &= P ( \text{Subject i died at } t_i | i \in R(t_i) \text{, death at } t_i )\\ 
+&= \frac{h_i(t_i)}{\sum_{k \in R(t_i)}{}h_k(t_i)}\\
+&= \frac{h_0(t_i)exp(\beta x_i)}{\sum_{k \in R(t_i)}{}h_0(t_i)exp(\beta x_k)}\\
+&= \frac{exp(\beta x_i)}{\sum_{k \in R(t_i)}{}exp(\beta x_k)}\\
+  \end{aligned}
+\end{equation}
+```
+where $h_i(t_i$ is the hazard rate function for subject $i$ at time $t_i$ and $R(t_i)$ contains subjects under observation at $t-$, in other words, risk set at $t_i$.
+
+Then, the partial likelihood is the product of **conditional probabilities** for each individual $i$ over all failure times and taking the logarithm, which is obtained the form of estimated $\hat{\beta}$:
+
+```{=tex}
+\begin{equation}
+PL(\beta) = \prod_{i}^{D}L_{i}(\beta) = \prod_{i}^{D}\frac{exp(\beta^T x_i)}{\sum_{k \in R(t_i)}{}exp(\beta^T x_k)}\\
+\end{equation}
+```
+where assuming individual $i$ dies at $t_i$, $i = 1,2,3,...,D$ when D means no deaths and $t_1 < t_2 < t_3 <...<t_D$. Notice that we use Breslow method for taking the average of all possible ordering of the tied event times as the contribution to the likelihood.
+
+Estimating $beta$ by maximizing derives[@polsterl_survival_2019-2]:
+
+```{=tex}
+\begin{equation}
+\hat{\beta} = \arg \max_{\beta} \log PL (\beta) = \sum_{i=1}^{n}\delta_{i} \biggr[ \beta^T x_i-\log \biggl(\sum_{k \in R(t_i)} exp(\beta^T x_k)\biggl) \biggr]\\
+\end{equation}
+```
+
+Note that the partial likelihood is a function of $\beta$ only without specifying the baseline hazard function $h_0(\cdot)$.
+
+```{r echo=FALSE, fig.align = "center"}
+knitr::include_graphics("DeepSurv.svg")
+```
+
+The first attempt to integrate survival analysis with neural networks based on the Cox proportional hazards model incorporates only a single hidden layer. The primary aim of the initial model was to identify the relationship between the primary covariates and their associated hazard function. However, subsequent enhancements for neural network architecture using Cox regression model in complex, large datasets to derive non-linear associations between variables, at the mean time, preserving the primary proportional hazards assumption, is a pretty challenging task. Despite this, [Faraggi and Simon](https://scholar.google.com/scholar?cluster=8523249692591517459) (1995) proposed a new network with multiple hidden layers that was able to extend the non-linear properties of the model and preserve the proportional hazards assumption.
+
+DeepSurv is a deep feed-forward neural network which estimates the effect of subject's covariates in terms of hazard rate functions. The risk function $h_\theta(t)$ of DeepSurv is estimated by parameterized weights of the network ($\theta$)[@polsterl_survival_2019-2]. The `loss function` of the network shown below is computed by taking a negative log over the partial likelihood function mentioned above, with additional modification such as regularization[@moradmand_role_2021]:
+
+```{=tex}
+\begin{equation}
+loss(\theta) = - \frac{1}{N(e=1)} \sum_{i: e_i=1} 1 \biggr[ \beta^T x_i-\log \biggl(\sum_{k \in R(t_i)} exp(\beta^T x_k) \biggl) \biggr] + \lambda * ||\theta_{2}^2||\\
+\end{equation}
+```
+where $\lambda$ is the $L2$ regularization and $N(e=1)$ refers to the set of individuals with observed event time.
+
+DeepSurv neural network have incorporated more advanced training techniques such as rectified linear unit (ReLU) function, dropout rate, weight decay and so on. The next section we are going to analyze is using multiple packages in R for an application of survival neural networks on our dataset.
+
+## Introduction of mlr3
+
+The `mlr3` package in R is a cutting-edge machine learning toolset. It offers a comprehensive solution for all machine learning requirements, covering preprocessing, model learning and evaluation, ensembles, and visualization. The `mlr3`-object consists of distinct components, including tasks, learners, resampling, and benchmarking.
+
+A **task** is an object that contains data (usually in tabular form) along with metadata that defines a machine learning problem. The metadata specifies which columns should be used to predict other columns and provides information about the data types. In `mlr3`, machine learning algorithms are referred to as **learners**. Given the data, learners train models by drawing potential models from a parameterized space and adjusting the parameters to best fit the data. Learners operate in two stages: training (where a model is trained to capture the relationship between features and the target variable) and prediction (where the trained model is used to make predictions on new data). **Resampling** is a technique used to estimate the performance of machine learning models. It involves repeatedly sampling different subsets from the available data to assess the stability and generalization of a model's performance. Resampling methods like cross-validation or bootstrap split the data into training and validation sets multiple times, allowing for evaluation on diverse subsets of data. **Benchmarking** involves comparing the performance of multiple machine learning models using a predefined evaluation protocol. Its goal is to identify the best-performing model for a given problem. Benchmarking typically involves training and evaluating multiple models on multiple tasks and employs resampling techniques to obtain reliable estimates of performance[@mlr3]. For this analysis, we employed Python's neural networks and accessed them through the `survivalmodels` package in R. To load these models and obtain survival tasks, we utilized the `mlr3proba` interface because `survivalmodels` package has limited functionality, which works well only in basic model fitting and predicting, but neural networks typically require preprocessing data and model tuning, so instead we're going to use `mlr3proba` as interface. The configuration of hyper-parameters and tuning controls was facilitated by `mlr3tuning`, while `mlr3pipelines` aided in data pre-processing. Lastly, we employed `mlr3benchmark` to analyze and compare the outcomes across various datasets[@vollmer_neural_2021].
+
+```{r, echo=TRUE}
+## Data import
+flchain <- mlr3proba::TaskSurv$new("flchain", flchain, time = "futime", 
+                                   event = "death")
+flchain_curve <- mlr3viz::autoplot(flchain)
+```
+
+```{r, echo=TRUE}
+## get the `whas` task from mlr3proba
+whas <- tsk("whas")
+## combine in list
+tasks <- list(whas, flchain)
+```
+
+## Neural Network Architecture
+
+A neural network is comprised of layers of neurons, including an input layer, one or more hidden layers, and an output layer at its core. To address the issue of overfitting, one commonly used and effective approach is dropout. During training, ***dropout*** randomly sets a certain number of output features in a layer to zero. ***Weight decay***, on the other hand, is a prevalent regularization technique that imposes constraints on the size of weights, particularly through the regularization of L2 norm in deep neural networks (DNNs). This regularization encourages smaller weights for insignificant signals (noise), while allowing relatively larger weights for consistently strong signals[@noauthor_feedforward_nodate]. To tackle the challenge of determining whether the network reaches a global or local minimum in terms of the loss value, we utilized the ***Adam optimizer*** in this analysis. The Adam optimizer adaptively adjusts the learning rate for each parameter during training by utilizing the first and second moments of the gradients. It calculates individual learning rates for different parameters based on their past gradients and updates them accordingly. In the `survivalmodels` framework, the number of nodes is specified as a vector of arbitrary length and is not directly tunable. Consequently, we approached the tuning process by separately tuning the number of ***nodes*** in a layer and the number of ***layers***. We then combined the two using a transformation. In our transformation we assure the same number of nodes per layer, which is a fairly usual assumption. For our analysis, we focused on training and tuning the Pycox neural network.
+
+The neural network was tuned using the following configurations:
+
+-   Dropout fraction (tuned over the range [0,1])
+
+-   Weight decay (tuned over the range [0, 0.5])
+
+-   Learning rate (tuned over the range [0,1])
+
+-   Number of nodes in a layer (ranging from 1 to 32)
+
+-   Number of hidden layers (ranging from 1 to 6)
+
+To create the hyper-parameter search space, we utilized the `paradox` package.
+
+```{r, echo=TRUE}
+library(paradox)
+search_space <- ps(
+ ## p_dbl for numeric valued parameters
+ dropout = p_dbl(lower = 0, upper = 1),
+ weight_decay = p_dbl(lower = 0, upper = 0.5),
+ learning_rate = p_dbl(lower = 0, upper = 1),
+ ## p_int for integer valued parameters
+ nodes = p_int(lower = 1, upper = 32),
+ k = p_int(lower = 1, upper = 6)
+)
+search_space$trafo <- function(x, param_set) {
+ x$num_nodes = rep(x$nodes, x$k)
+ x$nodes = x$k = NULL
+ return(x)
+}
+```
+
+## Hyper-parameter Optimization
+
+Machine learning algorithms typically consist of parameters and hyperparameters. Parameters are the coefficients or weights of the model that are determined by the learning algorithm based on the training data. On the other hand, hyperparameters are user-configured and influence how the model fits its parameters. The process of tuning these hyperparameters follows a black-box optimization approach. A neural network algorithm is configured with specific values for one or more hyperparameters, and then it is evaluated using a resampling method to measure its performance. This process is repeated with multiple configurations, and ultimately the configuration that exhibits the best performance is selected. Once the learner has been tuned, it can be used by constructing a new learner with the same underlying algorithm and setting the learner's hyperparameters to the optimal configuration. In our analysis, we utilized the **AutoTuner** classes in `mlr3`, which provide a useful framework for wrapping learners and incorporating an automatic tuning process for a given set of parameters. This allows for transparent tuning of any learner without the need to construct a new learner with the tuned configuration at the end. The AutoTuner inherits from the base learner class[@mlr3]. Within the benchmark experiment, we wrapped the learners in an AutoTuner to facilitate easy tuning. For the tuning process, we employed 3-fold nested cross-validation, optimizing for the C-index, and performed a random search with 30 iterations. The following hyperparameters were set for all learners: 30% of the nested training data was held back as validation data for early stopping, the Adam optimizer was used, and a maximum of 100 epochs was specified. The Adam optimizer is an optimization algorithm that replaces the classical stochastic gradient descent procedure for iterative weight updates in neural networks. Research has shown that Adam consistently outperforms other optimizers such as AdaGrad, SGD, RMSP, etc., in DNNs. Additionally, an epoch refers to the number of times the algorithm processes the entire dataset. In other words, each complete pass through all the samples in the dataset is considered one epoch[@noauthor_feedforward_nodate].
+
+```{r, echo=TRUE}
+create_autotuner <- function(learner) {
+ AutoTuner$new(
+   learner = learner,
+   search_space = search_space,
+   resampling = rsmp("cv", folds = 3),
+   measure = msr("surv.cindex"),
+   terminator = trm("evals", n_evals = 30),
+   tuner = tnr("random_search")
+ )
+}
+## learners are stored in mlr3extralearners
+library(mlr3extralearners)
+## load learners
+learners <- lrns(
+ paste0("surv.", c("deephit", "deepsurv")), #"coxtime",
+ frac = 0.3, early_stopping = TRUE, epochs = 100, optimizer = "adam"
+)
+# apply our function
+learners <- lapply(learners, create_autotuner)
+
+library(mlr3pipelines)
+create_pipeops <- function(learner) {
+ po("encode") %>>% po("scale") %>>% po("learner", learner)
+}
+## apply our function
+learners <- lapply(learners, create_pipeops)
+```
+
+## Resampling
+
+Resampling strategies involve repetitively dividing all the available data into multiple training and test sets. In `mlr3`, each repetition of this process is referred to as a resampling iteration. During each iteration, an intermediate model is trained on the training set, and the remaining test set is used to measure the model's performance. The generalization performance is then estimated by aggregating the performance scores across multiple resampling iterations[@mlr3]. The purpose of repeating the data splitting process is to ensure that more data points are utilized for both training and testing, enabling a more efficient utilization of all available data for performance estimation. This approach helps reduce variance and leads to a more reliable performance estimate. In our analysis, we employed cross-validation as our chosen resampling strategy, specifically using 3-fold cross-validation.
+
+```{r, echo = TRUE, message=FALSE, warning=FALSE, results='hide'}
+## select holdout as the re-sampling strategy
+resampling <- rsmp("cv", folds = 3)
+```
+
+## Benchmarking
+
+Benchmarking in supervised machine learning involves comparing different learners on a single task or multiple tasks. The primary objective when comparing learners is often to rank them based on a predetermined performance measure and identify the best-performing learner for the given task or domain. To conduct the benchmark experiment, we utilized the benchmark design we constructed and passed it to the `benchmark()` function. This function internally called `resample()` for all combinations of tasks, learners, and resampling strategies specified in our benchmark design[@mlr3]. Our analysis focused on evaluating unique combinations of tasks and learners, specifically the "flchain" task with the tuned survival deep hit algorithm and the "flchain" task with the tuned survival deep survival algorithm. For comparison, we included the Kaplan-Meier and multivariate Cox PH learners in the experiment.
+
+To aggregate the benchmark results, we employed **Harrell's C-index** as the performance measure. Harrell's C-index is commonly used in survival analysis and medical research to assess the predictive accuracy of a statistical model. It measures how well a model can rank individuals based on their predicted risks or survival times. The C-index ranges from 0 to 1, where 0.5 indicates random prediction and 1 indicates perfect prediction. A higher C-index value indicates a stronger discriminatory power of the model in distinguishing individuals with different outcomes.
+
+```{r, echo = TRUE, message=FALSE, warning=FALSE, results='hide'}
+library(mlr3benchmark)
+## add KM and CPH
+learners <- c(learners, lrns(c("surv.kaplan", "surv.coxph")))
+design <- benchmark_grid(tasks, learners, resampling)
+bm <- benchmark(design)
+## Aggreggate with Harrell's C and Integrated Graf Score
+msrs <- msrs(c("surv.cindex", "surv.graf"))
+bm$aggregate(msrs)[, c(3, 4, 7, 8)]
+```
+
+# Prediction Evaluation (Concordance Index)
+
+```{r, fig.height=7, fig.width=8}
+## load ggplot2 for autoplots
+library(mlr3viz)
+library(PMCMRplus) # Friedman rank sum test required
+library(ggplot2)
+## create mlr3benchmark object
+bma <- as_benchmark_aggr(bm)
+## critical difference diagrams for IGS
+c_score <- ggplot2::autoplot(bma, measure = "graf", type = "mean", ratio = 1/3, p.value = 0.1) + theme(axis.text.x = element_text(angle =30, vjust = 0.8, hjust=1))
+ggsave(filename = "c_score.png", plot = c_score, device = "png", path = "/Users/jialinliu/Desktop/PHP 2650", dpi = 500, height = 6, width = 10, units = "in", bg = "white")
+```
+
+```{r echo=FALSE, fig.align = "center"}
+knitr::include_graphics("c_score.png")
+```
+
+Based on the above graph, in terms of predictive accuracy, we observed that the Cox proportional hazards model (Coxph), a traditional model used in survival analysis, slightly outperformed the neural network algorithms, namely Deephit and Deepsurv. After tuning the parameters, the C-index values for Deephit and Deepsurv were found to be 0.7776 and 0.7787, respectively. On the other hand, the classic survival model Coxph achieved a C-index of 0.7920. In contrast, the Kaplan-Meier estimator yielded a C-index of 0.5, indicating random prediction.
+
+# Closing Thoughts
+
+There are two possible explanations for our analysis results. Firstly, some studies suggest that DeepSurv, a deep learning model, excels in capturing complex associations among risk factors [@moradmand2021role]. However, in the case of the relatively simple "flchain" dataset with only eight considered features, the deep learning-based survival models may not have had ample complexity to exploit. Secondly, the performance of deep learning-based survival models is greatly influenced by the appropriate configuration of hyperparameters. Our finding of Coxph performing better is consistent with the comparison results of DeepSurv versus Coxph in the flchain dataset by Giunchiglia et al [@giunchiglia2018rnn]. In their research, they introduced a different recurrent neural network model called RNN-SURV, which aimed to predict personalized risk scores and survival probability functions for each patient in the presence of censored data. Their model consistently outperformed other competing approaches among 5 data sets including the "flchain" analyzed here when evaluating the C-index.
+
+# Reference
